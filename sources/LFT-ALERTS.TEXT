@@ -1,0 +1,69 @@
+; ==========================================================================
+;  LFT-ALERTS.TEXT -- phrase-file source for LisaFetch (419325).
+;  Compiled by the Workshop 'Alert' tool into T419325PHRASE.
+;  Comments on their OWN lines; blank lines are STRUCTURAL; alert numbers
+;  ascend and 1 and 2 are REQUIRED; each section ends with a lone 0.
+; ==========================================================================
+;
+; REV A -- 30-Oct-2026: first build.  Three alerts, four menus.
+; Cache bytes 4000 (see LFB-ALERTS: below the Alert tool's suggestion it
+; pauses for a key and eats the next line of the MAKE exec).
+; Menus are matched BY POSITION against the mi* constants in LFT-GLOBALS;
+; a '-' separator counts as a position.  No menu item starts with a digit.
+;
+; ---- FILE HEADER ---------------------------------------------------------
+1
+4
+4000
+?
+Wait
+Stop
+Note
+Caution
+Cancel
+OK
+
+; ==== ALERTS ==============================================================
+;
+1 note alert
+LisaFetch could not find the message that belongs here.
+If you cannot proceed, mention the number ^N.
+
+2 stop alert
+LisaFetch is having trouble reaching the disk that holds the tool.^L^L
+Put your documents away one at a time, or press the on-off button to
+save them all.
+
+11 note alert
+LisaFetch 0.1   (30 October 2026)^L^L
+Fetches a text file from the web and saves it as a Workshop .TEXT file
+beside the tool (or at a path you type), for the Editor and the Pascal
+compiler.  Through an ESPFuji ESProFile, an RS-232 FujiNet or a LisaNet.^L^L
+Press G, type the address, then a name.  ? for help.^L
+Tool 419325.  T. O'Connor (bmwcyclist), 2026.
+
+0
+
+; ==== MENUS ===============================================================
+;
+1
+File/Print
+Set Aside Everything
+Set Aside LisaFetch
+-
+Save & Put Away
+
+2
+Fetch
+Fetch a Text File .../G
+Fetch Again/R
+
+3
+Help
+How to Use/?
+
+4
+Version
+About LisaFetch
+
+0

@@ -1,0 +1,1147 @@
+program LisaFetch;
+
+{ LFT-MAIN.TEXT -- LisaFetch  ***  0.1 REV A  ***                        }
+{ REV A  30-Oct-2026  First build.  NOT yet compiled on a Lisa.          }
+{                                                                        }
+{ THIS LINE IS THE VERSION CHECK.  The authoritative constant is        }
+{ lftVersion in LFT-GLOBALS.TEXT; keep the two in step.                  }
+{                                                                        }
+{ Tool 419325.  Skeleton: EFJ-MAIN REV D (the ESPFuji test tool): the    }
+{ callbacks, the status pane, the typed prompt, the event loop and       }
+{ Initialize.  The network is FnBus (LisaFuji 1.2's unit): a serial      }
+{ FujiNet, a LisaNet, or an ESPFuji ESProFile (found at launch).         }
+{                                                                        }
+{ WHAT IT DOES                                                           }
+{   G  asks for a web address, then a file name; fetches the file and   }
+{      writes it as a Workshop text file (a 1024-byte header page of     }
+{      nulls, then 1024-byte pages of whole lines, each line ended by a  }
+{      CR, each page filled with nulls).  LF, CR LF and CR all end a     }
+{      line; a tab becomes spaces to the next column of 8; bytes outside }
+{      32..126 become '?' (controls are dropped).  The file is written   }
+{      to LISAFETCH.TEMP first and renamed only when the fetch is whole, }
+{      so a failed fetch never harms a file that was there.              }
+{   R  the same address again (the name is asked again).   ?  help.      }
+
+uses (*$U UnitStd.obj *)   UnitStd,
+     (*$U UnitHz.obj *)    UnitHz,
+     (*$U Storage.obj *)   Storage,
+     (*$U QuickDraw.obj *) QuickDraw,
+     (*$U Fontmgr.obj *)   FontMgr,
+     (*$U SysCall.obj *)   SysCall,
+     (*$U wm.events.obj *) Events,
+     (*$U wm.folders.obj *) Folders,
+     (*$U wm.menus.obj *)  Menus,
+     (*$U AlertMgr.obj *)  AlertMgr,
+     (*$U WMLstd.obj *)    WMLstd,
+     (*$U WMlCrs.obj *)    WMLCrs,
+     (*$U FilerComm.obj *) FilerComm,
+     (*$U LFT/GLOBALS.OBJ *) LftGlobals,
+     (*$U LFT/FNBUS.OBJ *)   FnBus;
+
+const
+   tmpName = 'LISAFETCH.TEMP';
+   ftIdle  = 20000;           { ms a fetch waits with nothing arriving }
+
+var
+   termErr : integer;
+
+{------------------------------------------------------------------------}
+{ The three required callbacks.                                          }
+{------------------------------------------------------------------------}
+
+function OutOfHeapSpace (hz : THz; bytesNeeded : integer) : integer;
+begin
+   OutOfHeapSpace := 0
+end;
+
+procedure AlertFailed;
+var err : integer;
+begin
+   if initing then begin
+      TellFiler(err, initFailed, noMemory, nil);
+      Halt
+   end
+end;
+
+procedure LastWishes (environPtr : p_env_blk; excepDataPtr : p_ex_data);
+begin
+   FnMbDn;
+   FnPortDn;
+   ImDying;
+   Halt
+end;
+
+{------------------------------------------------------------------------}
+{ Menus.                                                                 }
+{------------------------------------------------------------------------}
+
+procedure PutUpMenus;
+var m : integer;
+begin
+   ClearMenuBar;
+   for m := mFile to lastBarMenu do
+      InsertMenu(myMenus[m], 0);
+   DrawMenuBar
+end;
+
+{------------------------------------------------------------------------}
+{ The status pane.                                                       }
+{------------------------------------------------------------------------}
+
+procedure DrawShow;
+{ Repaint the whole status pane. }
+var fi : FontInfo;
+    i  : integer;
+begin
+   if myWindow = nil then
+      exit(DrawShow);
+   SetPort(myWindow);
+   EraseRect(myWindow^.portRect);
+   GetFontInfo(fi);
+   for i := 1 to statCnt do begin
+      MoveTo(10, 6 + (i - 1) * lineHt + fi.ascent);
+      DrawString(statLine[i])
+   end
+end;
+
+procedure DrawOne (i : integer);
+{ Repaint pane line i only: no flash while typing. }
+var fi : FontInfo;
+    r  : Rect;
+begin
+   if myWindow = nil then
+      exit(DrawOne);
+   SetPort(myWindow);
+   r := myWindow^.portRect;
+   r.top := 6 + (i - 1) * lineHt;
+   r.bottom := r.top + lineHt;
+   EraseRect(r);
+   GetFontInfo(fi);
+   MoveTo(10, 6 + (i - 1) * lineHt + fi.ascent);
+   DrawString(statLine[i])
+end;
+
+procedure AddLine (var s : StatStr);
+{ Append a line; scroll the list up when full; repaint. }
+var i : integer;
+begin
+   if statCnt < maxLines then
+      statCnt := statCnt + 1
+   else
+      for i := 1 to maxLines - 1 do
+         statLine[i] := statLine[i + 1];
+   statLine[statCnt] := s;
+   if not quiet then DrawShow
+end;
+
+procedure SetLast (var s : StatStr);
+{ Replace the last line and repaint that line only. }
+begin
+   if statCnt = 0 then
+      AddLine(s)
+   else begin
+      statLine[statCnt] := s;
+      DrawOne(statCnt)
+   end
+end;
+
+procedure AddBig (var big : Str255);
+{ Append a long string as as many lines as it needs (76 columns fit the }
+{ window; a cut lands on a space when one is near), nothing clipped.   }
+var out  : StatStr;
+    rest : Str255;
+    n, cut, i : integer;
+begin
+   rest := big;
+   if length(rest) = 0 then begin
+      out := '';
+      AddLine(out);
+      exit(AddBig)
+   end;
+   repeat
+      n := length(rest);
+      cut := n;
+      if n > 76 then begin
+         cut := 76;
+         i := 76;
+         while (i > 50) and (rest[i] <> ' ') do
+            i := i - 1;
+         if i > 50 then cut := i
+      end;
+      out := copy(rest, 1, cut);
+      AddLine(out);
+      if cut < n then
+         rest := copy(rest, cut + 1, n - cut)
+      else
+         rest := ''
+   until length(rest) = 0
+end;
+
+procedure LogMode;
+{ Clear the pane for a fresh run of lines. }
+begin
+   statCnt := 0
+end;
+
+procedure RouteNm (var s : Str255);
+{ Where the network is, in words. }
+var part : Str255;
+begin
+   if fnVia = fnViaMb then
+      s := 'the ESProFile'
+   else begin
+      FnNum(curBaud, part);
+      if fnPortA then
+         s := concat('Serial A, ', concat(part, ' baud'))
+      else
+         s := concat('Serial B, ', concat(part, ' baud'))
+   end
+end;
+
+procedure Head (var ttl : StatStr);
+{ A fresh pane: the version and route line, the title, a blank line. }
+var row : StatStr;
+    big : Str255;
+    rt  : Str255;
+begin
+   LogMode;
+   RouteNm(rt);
+   big := concat(lftVersion, concat('     ', rt));
+   AddBig(big);
+   AddLine(ttl);
+   row := '';
+   AddLine(row)
+end;
+
+{------------------------------------------------------------------------}
+{ The pages.                                                             }
+{------------------------------------------------------------------------}
+
+procedure HomePage;
+var row : StatStr;
+begin
+   quiet := true;
+   row := 'Fetch a text file from the web and save it as a Workshop .TEXT file';
+   Head(row);
+   row := 'G = fetch a file: type its web address, then a name for it on the Lisa';
+   AddLine(row);
+   row := 'R = fetch the same address again             ? = help';
+   AddLine(row);
+   row := '';
+   AddLine(row);
+   row := 'The file goes beside this tool (or type a whole path: -#12-SRC/MAIN.TEXT).';
+   AddLine(row);
+   row := 'Plain text: Pascal sources, exec files, notes.  Up to 32 KB through an';
+   AddLine(row);
+   row := 'ESPFuji drive; through a serial FujiNet there is no fixed limit.';
+   AddLine(row);
+   row := '';
+   AddLine(row);
+   row := 'Nothing is sent to the network until you press one of these keys.';
+   AddLine(row);
+   quiet := false;
+   DrawShow
+end;
+
+procedure HelpUse;
+var row : StatStr;
+begin
+   quiet := true;
+   row := 'How to use it';
+   Head(row);
+   row := 'Press G and type the address of a plain text file, e.g. a raw GitHub';
+   AddLine(row);
+   row := 'file (https://raw.githubusercontent.com/...), then RETURN.  Type a name';
+   AddLine(row);
+   row := 'for it on the Lisa; .TEXT is added if you leave it off.  The file is';
+   AddLine(row);
+   row := 'written to LISAFETCH.TEMP and renamed only when the fetch is complete.';
+   AddLine(row);
+   row := '';
+   AddLine(row);
+   row := 'The Workshop sees the file at once (Filemgr, the Editor, Pascal).  The';
+   AddLine(row);
+   row := 'Office System desktop does not show plain files as icons.';
+   AddLine(row);
+   row := '';
+   AddLine(row);
+   row := 'The network: an ESPFuji ESProFile is found by itself when this tool is on';
+   AddLine(row);
+   row := 'its volume (run the ESPFuji tool there once); otherwise the serial';
+   AddLine(row);
+   row := 'FujiNet, at the speed LisaFuji saved in FNSPEED.DATA beside the tool.';
+   AddLine(row);
+   quiet := false;
+   DrawShow
+end;
+
+{------------------------------------------------------------------------}
+{ Writing the Workshop text file.                                        }
+{------------------------------------------------------------------------}
+
+procedure WrPage;
+{ Fill the rest of the page with nulls and write it. }
+var wrote    : longint;
+    i        : integer;
+    schedErr : integer;
+begin
+   for i := pgLen to pageSz - 1 do
+      pgBuf[i] := 0;
+   if not wrBad then begin
+      Sched_Class(schedErr, false);
+      WRITE_DATA(wrEc, wrRef, ord4(@pgBuf), pageSz, wrote, sequential, 0);
+      Sched_Class(schedErr, true);
+      if (wrEc > 0) or (wrote <> pageSz) then
+         wrBad := true
+   end;
+   nPages := nPages + 1;
+   pgLen := 0
+end;
+
+procedure KeepPrev;
+{ The line being finished, for the preview (up to 76 characters). }
+var s   : StatStr;
+    one : string[1];
+    i, n, b : integer;
+begin
+   if nPrev >= prevMax then
+      exit(KeepPrev);
+   s := '';
+   one := ' ';
+   n := lnLen;
+   if n > 76 then n := 76;
+   for i := 0 to n - 1 do begin
+      b := lnBuf[i];
+      if b < 0 then b := b + 256;
+      one[1] := chr(b);
+      s := concat(s, one)
+   end;
+   nPrev := nPrev + 1;
+   prev[nPrev] := s
+end;
+
+procedure PutLine;
+{ The collected line and its CR into the page; a full page is written.  }
+{ A page keeps at least one null at its end (the CR-null rule).         }
+var i : integer;
+begin
+   if pgLen + lnLen + 1 > pageSz - 1 then
+      WrPage;
+   KeepPrev;
+   for i := 0 to lnLen - 1 do
+      pgBuf[pgLen + i] := lnBuf[i];
+   pgLen := pgLen + lnLen;
+   pgBuf[pgLen] := 13;
+   pgLen := pgLen + 1;
+   nLines := nLines + 1;
+   lnLen := 0
+end;
+
+procedure AddCh (c : integer);
+{ One printable character into the line; a very long line is cut. }
+begin
+   if lnLen >= lineMax then begin
+      PutLine;
+      nCut := nCut + 1
+   end;
+   lnBuf[lnLen] := c;
+   lnLen := lnLen + 1
+end;
+
+procedure TakeByte (b : integer);
+{ One byte from the network.  b is 0..255. }
+var k : integer;
+begin
+   gotBytes := gotBytes + 1;
+   if b = 10 then begin
+      if prevCR then
+         prevCR := false              { the LF of a CR LF: the line is done }
+      else
+         PutLine
+   end
+   else if b = 13 then begin
+      PutLine;
+      prevCR := true
+   end
+   else begin
+      prevCR := false;
+      if b = 9 then begin
+         k := 8 - (lnLen mod 8);
+         while k > 0 do begin
+            AddCh(32);
+            k := k - 1
+         end
+      end
+      else if b < 32 then
+         nOdd := nOdd + 1             { other controls are dropped }
+      else if b > 126 then begin
+         nOdd := nOdd + 1;
+         AddCh(63)                    { '?' }
+      end
+      else
+         AddCh(b)
+   end
+end;
+
+function OpenTmp (var tmp : Pathname) : boolean;
+{ Make (or reuse) LISAFETCH.TEMP, open it for writing from the start,  }
+{ and write the header page.                                           }
+var schedErr : integer;
+    i        : integer;
+begin
+   OpenTmp := false;
+   wrBad := false;
+   Sched_Class(schedErr, false);
+   MAKE_FILE(wrEc, tmp, 0);
+   Sched_Class(schedErr, true);
+   if (wrEc > 0) and (wrEc <> 890) then
+      exit(OpenTmp);
+   Sched_Class(schedErr, false);
+   OPEN(wrEc, tmp, wrRef, [DWrite]);
+   Sched_Class(schedErr, true);
+   if wrEc > 0 then
+      exit(OpenTmp);
+   pgLen := 0;
+   WrPage;                            { the header page: 1024 nulls }
+   nPages := 0;
+   lnLen := 0;
+   prevCR := false;
+   gotBytes := 0;
+   nLines := 0;
+   nCut := 0;
+   nOdd := 0;
+   nPrev := 0;
+   for i := 1 to prevMax do
+      prev[i] := '';
+   OpenTmp := not wrBad
+end;
+
+procedure CloseTmp;
+var ec, schedErr : integer;
+begin
+   Sched_Class(schedErr, false);
+   if not wrBad then
+      TRUNCATE(ec, wrRef);
+   CLOSE_OBJECT(ec, wrRef);
+   Sched_Class(schedErr, true)
+end;
+
+procedure KillTmp (var tmp : Pathname);
+var ec, schedErr : integer;
+begin
+   Sched_Class(schedErr, false);
+   KILL_OBJECT(ec, tmp);
+   Sched_Class(schedErr, true)
+end;
+
+{------------------------------------------------------------------------}
+{ Fetching.                                                              }
+{------------------------------------------------------------------------}
+
+procedure FullPath (var nm : LtName; var path : Pathname);
+{ A name alone goes beside the tool; a name starting with - is a path. }
+begin
+   if length(nm) > 0 then
+      if nm[1] = '-' then begin
+         path := nm;
+         exit(FullPath)
+      end;
+   path := concat(myVol, nm)
+end;
+
+procedure LeafOf (var path : Pathname; var leaf : E_Name);
+{ The last part of a path: everything after its last '-'. }
+var i, n : integer;
+begin
+   n := length(path);
+   i := n;
+   while (i > 1) and (path[i] <> '-') do
+      i := i - 1;
+   if (i >= 1) and (path[i] = '-') and (i < n) then begin
+      if n - i > 32 then
+         leaf := copy(path, i + 1, 32)
+      else
+         leaf := copy(path, i + 1, n - i)
+   end
+   else if n > 32 then
+      leaf := copy(path, 1, 32)
+   else
+      leaf := path
+end;
+
+procedure TmpOf (var path : Pathname; var tmp : Pathname);
+{ LISAFETCH.TEMP in the same folder as path. }
+var i, n : integer;
+begin
+   n := length(path);
+   i := n;
+   while (i > 1) and (path[i] <> '-') do
+      i := i - 1;
+   if (i > 1) and (path[i] = '-') then
+      tmp := concat(copy(path, 1, i), tmpName)
+   else
+      tmp := concat(myVol, tmpName)
+end;
+
+procedure NetWhy (st : integer; var why : Str255);
+{ An N: status code in words. }
+var part : Str255;
+begin
+   FnNum(st, part);
+   if st = 136 then
+      why := 'the server sent nothing back'
+   else if st = 170 then
+      why := 'the server was not found (status 170): is the WiFi up?'
+   else if st = 207 then
+      why := 'no connection to the server (status 207)'
+   else if fnVia = fnViaMb then begin
+      if length(fnMbWhy) > 0 then
+         why := concat('the drive says: ', fnMbWhy)
+      else
+         why := concat('the drive refused it, status ', part)
+   end
+   else
+      why := concat('the server refused it, status ', part)
+end;
+
+function NetUp (var why : Str255) : boolean;
+{ The serial port, when the network is not the ESProFile. }
+var old : longint;
+    ok  : boolean;
+begin
+   NetUp := false;
+   if fnVia <> fnViaMb then begin
+      if not fnFound then begin        { which speed answers?  Once per launch. }
+         old := curBaud;
+         if FnFind(curBaud) = fnOK then
+            if curBaud <> old then
+               ok := FnCfgSv(myVol, curBaud)
+      end
+   end;
+   if not FnPortUp(curBaud) then begin
+      if fnPortA then
+         why := 'Serial A would not open (is LISACom or LisaFuji open?)'
+      else
+         why := 'Serial B would not open (is LISACom or LisaFuji open?)';
+      exit(NetUp)
+   end;
+   NetUp := true
+end;
+
+function Pull (var why : Str255) : boolean;
+{ Fetch curUrl into the open temporary file.  FALSE: why says why. }
+var rc, k, i, b : integer;
+    idle        : longint;
+    t0          : longint;
+    clk         : boolean;
+    done, fail  : boolean;
+    url         : Str255;
+    head4       : Str255;
+begin
+   Pull := false;
+   url := curUrl;
+   head4 := '';
+   if length(url) >= 3 then
+      head4 := copy(url, 1, 3);
+   if (head4 <> 'N1:') and (head4 <> 'n1:') then
+      url := concat('N1:', url);
+   rc := FnNClos;                       { a channel left open by a failed fetch }
+   rc := FnNOpen(url, 4, 0);
+   if rc <> fnOK then begin
+      if (fnVia = fnViaMb) and (length(fnMbWhy) > 0) then
+         why := concat('the drive says: ', fnMbWhy)
+      else
+         why := 'the network did not take the request';
+      rc := FnNClos;
+      exit(Pull)
+   end;
+   if fnStat <> 1 then begin
+      NetWhy(fnStat, why);
+      rc := FnNClos;
+      exit(Pull)
+   end;
+   idle := 0;
+   FnTStart(t0, clk);
+   done := false;
+   fail := false;
+   while not (done or fail) do begin
+      if fnWait = 0 then begin
+         rc := FnNStat;
+         if rc <> fnOK then
+            fail := true
+         else if fnWait = 0 then begin
+            if fnStat = 136 then
+               done := true
+            else if (fnConn = 0) and (fnStat <> 1) then
+               done := true
+            else begin
+               FnNap(100);
+               idle := idle + 100;
+               if FnTOver(t0, clk, idle, ftIdle) then
+                  fail := true
+            end
+         end
+      end
+      else begin
+         k := fnRdMax;
+         if fnWait < k then
+            k := fnWait;
+         rc := FnNRead(k);
+         if rc <> fnOK then
+            fail := true
+         else begin
+            idle := 0;
+            FnTStart(t0, clk);
+            for i := 0 to fnPlLen - 1 do begin   { FnNRead has already lowered fnWait }
+               b := FnPlB(i);
+               if b < 0 then b := b + 256;
+               TakeByte(b)
+            end;
+            if wrBad then
+               fail := true
+         end
+      end
+   end;
+   rc := FnNClos;
+   if fail then begin
+      if wrBad then
+         why := 'the disk would not take the file (full?)'
+      else if gotBytes = 0 then
+         why := 'nothing arrived from the network'
+      else
+         why := 'the network stopped part-way: the file was not saved';
+      exit(Pull)
+   end;
+   if lnLen > 0 then
+      PutLine;                          { the last line had no line end }
+   if pgLen > 0 then
+      WrPage;
+   if wrBad then begin
+      why := 'the disk would not take the file (full?)';
+      exit(Pull)
+   end;
+   Pull := true
+end;
+
+procedure SayDone (var path : Pathname);
+var row  : StatStr;
+    big  : Str255;
+    part : Str255;
+    p2   : Str255;
+    i    : integer;
+begin
+   quiet := true;
+   row := 'Saved';
+   Head(row);
+   big := concat(path, '   ');
+   FnNum(nLines, part);
+   big := concat(big, concat(part, ' lines, '));
+   FnNum(gotBytes, part);
+   big := concat(big, concat(part, ' bytes received, '));
+   FnNum(nPages + 1, part);
+   big := concat(big, concat(part, ' Workshop pages'));
+   AddBig(big);
+   if (nCut > 0) or (nOdd > 0) then begin
+      FnNum(nCut, part);
+      FnNum(nOdd, p2);
+      big := concat(part, concat(' long lines cut; ', p2));
+      big := concat(big, ' bytes outside plain ASCII replaced or dropped');
+      AddBig(big)
+   end;
+   row := '';
+   AddLine(row);
+   for i := 1 to nPrev do
+      AddLine(prev[i]);
+   quiet := false;
+   DrawShow
+end;
+
+procedure DoFetch;
+{ Fetch curUrl into curName.  The file appears only when it is whole. }
+var path, tmp : Pathname;
+    leaf      : E_Name;
+    why       : Str255;
+    row       : StatStr;
+    big       : Str255;
+    part      : Str255;
+    ec, schedErr : integer;
+    ok        : boolean;
+begin
+   FullPath(curName, path);
+   TmpOf(path, tmp);
+   quiet := true;
+   row := 'Fetching';
+   Head(row);
+   AddBig(curUrl);
+   big := concat('into ', path);
+   AddBig(big);
+   row := 'Asking ...';
+   AddLine(row);
+   quiet := false;
+   DrawShow;
+   if not OpenTmp(tmp) then begin
+      FnNum(wrEc, part);
+      big := concat('LISAFETCH.TEMP could not be made (ecode ', concat(part, ').'));
+      AddBig(big);
+      exit(DoFetch)
+   end;
+   if not NetUp(why) then
+      ok := false
+   else begin
+      ok := Pull(why);
+      FnPortDn
+   end;
+   CloseTmp;
+   if not ok then begin
+      KillTmp(tmp);
+      big := concat('Not saved: ', why);
+      AddBig(big);
+      exit(DoFetch)
+   end;
+   Sched_Class(schedErr, false);
+   KILL_OBJECT(ec, path);              { the old file, if there was one }
+   LeafOf(path, leaf);
+   RENAME_ENTRY(wrEc, tmp, leaf);
+   Sched_Class(schedErr, true);
+   if wrEc > 0 then begin
+      FnNum(wrEc, part);
+      big := concat('Fetched, but the rename failed (ecode ', part);
+      big := concat(big, '): the text is in LISAFETCH.TEMP.');
+      AddBig(big);
+      exit(DoFetch)
+   end;
+   SayDone(path)
+end;
+
+{------------------------------------------------------------------------}
+{ The typed prompt, on the last pane line.                               }
+{------------------------------------------------------------------------}
+
+procedure DrawPrompt;
+{ The label and the last characters typed (a long address scrolls). }
+var row  : StatStr;
+    big  : Str255;
+    room, n : integer;
+begin
+   room := 76 - length(promptLbl);
+   n := length(promptTxt);
+   if n + 1 > room then
+      big := concat(promptLbl, concat(copy(promptTxt, n - room + 2, room - 1), '_'))
+   else
+      big := concat(promptLbl, concat(promptTxt, '_'));
+   row := big;
+   SetLast(row)
+end;
+
+procedure Ask (what : integer);
+var row : StatStr;
+    big : Str255;
+begin
+   quiet := true;
+   asking := what;
+   promptTxt := '';
+   if what = askUrl then begin
+      row := 'Fetch a text file: its web address';
+      Head(row);
+      row := 'Type the address and press RETURN; RETURN alone takes the last one:';
+      AddLine(row);
+      AddBig(curUrl);
+      row := 'Backspace corrects; Apple-. cancels.';
+      AddLine(row);
+      promptLbl := 'Address: '
+   end
+   else if what = askName then begin
+      row := 'Fetch a text file: its name on the Lisa';
+      Head(row);
+      AddBig(curUrl);
+      row := 'A name goes beside this tool; -#12-NAME or a longer path is used as typed.';
+      AddLine(row);
+      row := '.TEXT is added when the name has no dot.  RETURN alone takes the last:';
+      AddLine(row);
+      big := curName;
+      AddBig(big);
+      promptLbl := 'Name: '
+   end
+   else begin
+      row := 'That file is there already';
+      Head(row);
+      big := curName;
+      AddBig(big);
+      row := 'Y replaces it (only when the new one arrives whole); any other key cancels.';
+      AddLine(row);
+      promptLbl := 'Replace it?  '
+   end;
+   row := '';
+   AddLine(row);
+   promptOn := true;
+   AddLine(row);
+   quiet := false;
+   DrawShow;
+   DrawPrompt
+end;
+
+function Exists (var path : Pathname) : boolean;
+var ec, ref, schedErr : integer;
+begin
+   Sched_Class(schedErr, false);
+   OPEN(ec, path, ref, [DRead]);
+   if ec <= 0 then
+      CLOSE_OBJECT(ec, ref)
+   else
+      ec := 1;
+   Sched_Class(schedErr, true);
+   Exists := ec <= 0
+end;
+
+procedure NameIn;
+{ The typed name: .TEXT added when it has no dot; then fetch or ask. }
+var path : Pathname;
+    n    : integer;
+begin
+   if length(promptTxt) > 0 then begin
+      n := length(promptTxt);
+      if n > nameCap then n := nameCap;
+      curName := copy(promptTxt, 1, n);
+      if pos('.', curName) = 0 then
+         if length(curName) <= nameCap - 5 then
+            curName := concat(curName, '.TEXT')
+   end;
+   if length(curName) = 0 then begin
+      promptOn := false;
+      asking := askNone;
+      HomePage;
+      exit(NameIn)
+   end;
+   FullPath(curName, path);
+   if Exists(path) then
+      Ask(askRepl)
+   else begin
+      promptOn := false;
+      asking := askNone;
+      DoFetch
+   end
+end;
+
+procedure PromptKey (ch : char);
+var one : string[1];
+    n   : integer;
+begin
+   if asking = askRepl then begin
+      promptOn := false;
+      asking := askNone;
+      if (ch = 'Y') or (ch = 'y') then
+         DoFetch
+      else
+         HomePage;
+      exit(PromptKey)
+   end;
+   if ch = chr(13) then begin
+      if asking = askUrl then begin
+         if length(promptTxt) > 0 then
+            curUrl := promptTxt;
+         if length(curUrl) = 0 then begin
+            promptOn := false;
+            asking := askNone;
+            HomePage
+         end
+         else
+            Ask(askName)
+      end
+      else
+         NameIn
+   end
+   else if ch = chr(8) then begin
+      n := length(promptTxt);
+      if n > 0 then
+         promptTxt := copy(promptTxt, 1, n - 1);
+      DrawPrompt
+   end
+   else if (ch >= ' ') and (ch <= '~') then begin
+      n := urlCap;
+      if asking = askName then n := nameCap;
+      if length(promptTxt) < n then begin
+         one := ' ';
+         one[1] := ch;
+         promptTxt := concat(promptTxt, one)
+      end;
+      DrawPrompt
+   end
+end;
+
+procedure CancelPrompt;
+begin
+   promptOn := false;
+   asking := askNone;
+   HomePage
+end;
+
+procedure PlainKey (ch : char);
+{ Keys without the Apple key, when no prompt is up. }
+begin
+   if (ch = 'G') or (ch = 'g') then
+      Ask(askUrl)
+   else if (ch = 'R') or (ch = 'r') then begin
+      if length(curUrl) = 0 then Ask(askUrl) else Ask(askName)
+   end
+   else if ch = '?' then
+      HelpUse
+   else if (ch = 'H') or (ch = 'h') then
+      HomePage
+end;
+
+{------------------------------------------------------------------------}
+{ Window.                                                                }
+{------------------------------------------------------------------------}
+
+procedure doUpdateEvent (normal : boolean; window : WindowPtr);
+begin
+   if normal then BeginUpdate(window);
+   DrawShow;
+   if normal then EndUpdate(window)
+end;
+
+procedure InitNewDoc (window : WindowPtr);
+begin
+   myWindow := window;
+   TakeWindow(myWindow);
+   FolderSize(myWindow, winW, winH, false);
+   SetPort(myWindow);
+   ValidRect(myWindow^.portRect);
+
+   HomePage;
+   doUpdateEvent(false, myWindow);
+
+   if activeFolder = myWindow then
+      PutUpMenus
+end;
+
+procedure DoFilerEvent;
+var wantsOpen : boolean;
+begin
+   HandleFilerOp(wantsOpen);
+   if wantsOpen then
+      InitNewDoc(theEvent.who)
+end;
+
+{------------------------------------------------------------------------}
+{ Commands and events.                                                   }
+{------------------------------------------------------------------------}
+
+procedure MenuCommand (menu, item : integer);
+var err : integer;
+begin
+   if promptOn then begin               { a menu command abandons the prompt }
+      promptOn := false;
+      asking := askNone
+   end;
+   case menu of
+
+      mFile :
+         case item of
+            miAsideAll : DoFilingCmd(cmdClosAll);
+            miAside    : DoFilingCmd(cmdClose);
+            miPutAway  :
+               begin
+                  FnMbDn;
+                  TellFiler(err, docClosd, docPutBack, myWindow);
+                  myWindow := nil
+               end;
+         end;
+
+      mFetch :
+         case item of
+            miGet   : Ask(askUrl);
+            miAgain : if length(curUrl) = 0 then Ask(askUrl) else Ask(askName);
+         end;
+
+      mHelp :
+         case item of
+            miHelpUse : HelpUse;
+         end;
+
+      mVer :
+         case item of
+            miAbout : NoteAlert(allAlerts, alrtAbou);
+         end;
+
+   end
+end;
+
+procedure ProcessTheEvent;
+var theMenu, theItem : integer;
+begin
+   case theEvent.what of
+
+      buttonDown :
+         if theEvent.who = menuFolder then begin
+            MenuSelect(theEvent.where, theMenu, theItem);
+            if (theMenu <> 0) and (theItem <> 0) then
+               MenuCommand(theMenu, theItem);
+            HiLiteMenu(0)
+         end;
+
+      buttonUp :
+         ;
+
+      keyDown :
+         if (theEvent.who = myWindow) and (not theEvent.repeatKey) then begin
+            if theEvent.appleKey then begin
+               if (theEvent.ascii = '.') and promptOn then
+                  CancelPrompt
+               else begin
+                  MenuKey(theEvent.ascii, theMenu, theItem);
+                  if theMenu <> 0 then begin
+                     HiLiteMenu(theMenu);
+                     MenuCommand(theMenu, theItem);
+                     HiLiteMenu(0)
+                  end
+               end
+            end
+            else if promptOn then
+               PromptKey(theEvent.ascii)
+            else
+               PlainKey(theEvent.ascii)
+         end;
+
+      folderActivate :
+         begin
+            TakeControl(theEvent, false, false);
+            PutUpMenus
+         end;
+
+      folderDeactivate :
+         GiveControl(theEvent);
+
+      folderUpdate :
+         if theEvent.who = myWindow then
+            doUpdateEvent(true, theEvent.who)
+         else begin
+            BeginUpdate(theEvent.who);
+            EndUpdate(theEvent.who)
+         end;
+
+      folderMoved :
+         ;
+
+      filerEvent :
+         DoFilerEvent;
+
+      abortEvent, diedEvent, diskEvent, catalogEvent, nilEvent :
+         ;
+
+      otherwise
+
+   end
+end;
+
+{------------------------------------------------------------------------}
+{ Initialize.                                                            }
+{------------------------------------------------------------------------}
+
+procedure Initialize;
+var err      : integer;
+    schedErr : integer;
+    tmp1     : string[1];
+    pcInfo   : procinfoRec;
+    excName  : t_ex_name;
+    myPrefix : TParamAlert;
+    cutAt    : integer;
+begin
+   initing := true;
+
+   excName := 'SYS_TERMINATE';
+   Declare_Excep_Hdl(err, excName, @LastWishes);
+   if err <> 0 then begin
+      TellFiler(err, initFailed, noMemory, nil);
+      halt
+   end;
+
+   toldToDie := false;
+   myWindow  := nil;
+   statCnt   := 0;
+   quiet     := false;
+   promptOn  := false;
+   asking    := askNone;
+   promptTxt := '';
+   promptLbl := '';
+   curUrl    := '';
+   curName   := '';
+   curBaud   := 9600;
+   wrBad     := false;
+   nPrev     := 0;
+   FnInit;
+
+   InitHeap(@myZone[0], @myZone[maxHeap], @OutOfHeapSpace);
+
+   Sched_Class(schedErr, false);
+   Info_Process(err, My_ID, pcInfo);
+   Sched_Class(schedErr, true);
+
+   cutAt := pos('}', pcInfo.progpathname);
+   if (cutAt = 0) or (cutAt > 40) then begin
+      TellFiler(err, initFailed, internalError, nil);
+      halt
+   end;
+   myPrefix := copy(pcInfo.progpathname, 1, cutAt);
+   { the device prefix alone: everything before the open-brace of the  }
+   { tool file set.  chr(123) is the open brace, built the SanName way. }
+   tmp1 := ' ';
+   tmp1[1] := chr(123);
+   cutAt := pos(tmp1, pcInfo.progpathname);
+   if (cutAt > 1) and (cutAt <= 33) then
+      myVol := copy(pcInfo.progpathname, 1, cutAt - 1)
+   else
+      myVol := '-#12-';                { defensive fallback: boot }
+   if FnCfgLd(myVol, curBaud) then ;    { the speed and port LisaFuji saved, if FNSPEED.DATA is there }
+   FnSetVol(myVol);                     { where MAILBOX.DATA (an ESPFuji drive) is looked for }
+   if FnMbUp then ;                     { probe it now, so the header is right from the start }
+
+   InitMP(theHeap, myPrefix, @AlertFailed, alertVerNum,
+          @myMenus[mFile], allAlerts, err);
+   if err > 0 then begin
+      TellFiler(err, initFailed, noMemory, nil);
+      halt
+   end;
+
+   InitWmlCrs(err);
+   if err <> 0 then begin
+      TellFiler(err, initFailed, noDiskSpace, nil);
+      halt
+   end;
+
+   SetPort(deskPort);
+
+   initing := false
+end;
+
+{------------------------------------------------------------------------}
+{ The main program -- two-phase loop, nothing to do when idle.           }
+{------------------------------------------------------------------------}
+
+begin { main program }
+
+   InitGraf(@thePort);
+   OpenWm;
+   Initialize;
+
+   repeat
+
+      while not (ImActive or toldToDie) do begin
+         GetEvent(theEvent);
+         ProcessTheEvent
+      end;
+
+      while ImActive and (not toldToDie) do begin
+         if EventAvail then begin
+            GetEvent(theEvent);
+            ProcessTheEvent
+         end
+         else
+            LetOthersRun
+      end;
+
+   until toldToDie;
+
+   FnMbDn;
+   termErr := 0
+end.

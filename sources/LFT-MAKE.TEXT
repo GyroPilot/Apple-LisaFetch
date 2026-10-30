@@ -1,0 +1,27 @@
+$EXEC
+${==========================================================================}
+${ LFT-MAKE.TEXT -- build LisaFetch: compile, link, put the Obj and ICON    }
+${ files in place as tool 419325, compile the phrase file.  THEN run       }
+${ LFT/INSTALL (R <LFT/INSTALL).  Same two-exec recipe as PZL-MAKE REV C.  }
+${                                                                          }
+${ 419325: assigned 30-Oct-2026 (TOOL_NUMBERS.txt; next after ESPFuji      }
+${ 419324).  The number appears only in this file and in LFT/INSTALL.      }
+${                                                                          }
+${ LFT/ICON.BIN must be on the disk before this runs.                      }
+${==========================================================================}
+$SUBMIT LFT/COMP
+$SUBMIT LFT/LINK
+${                                                                          }
+F{ilemgr}D{elete}~{T419325~}Obj
+Y{es}D{elete}~{T419325~}PHRASE
+Y{es}D{elete}~{T419325~}ICON
+Y{es}C{opy}LFT/LFT.OBJ
+~{T419325~}Obj
+C{opy}LFT/ICON.BIN
+~{T419325~}ICON
+Q{uit}
+${                                                                          }
+R{un}Alert
+LFT/ALERTS.TEXT
+~{T419325~}
+$ENDEXEC

@@ -1,0 +1,19 @@
+$EXEC
+${==========================================================================}
+${ LFT-COMP.TEXT -- compile LisaFetch: GLOBALS, then FNBUS, then MAIN.      }
+${==========================================================================}
+F{ilemgr}D{elete}LFT/FNBUS.OBJ  Y{es}
+        D{elete}LFT/GLOBALS.OBJ  Y{es}
+        D{elete}LFT/MAIN.OBJ  Y{es}
+        Q{uit}
+${                                                                          }
+P{ascal Compile}LFT/GLOBALS.TEXT
+{no listing file - this comment-only line is the [RETURN] answer}
+LFT/GLOBALS.OBJ
+P{ascal Compile}LFT/FNBUS.TEXT
+{no listing file}
+LFT/FNBUS.OBJ
+P{ascal Compile}LFT/MAIN.TEXT
+{no listing file}
+LFT/MAIN.OBJ
+$ENDEXEC

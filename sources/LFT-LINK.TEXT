@@ -1,0 +1,19 @@
+$EXEC
+${==========================================================================}
+${ LFT-LINK.TEXT -- link LisaFetch.  Intrinsic units (QuickDraw, the WM     }
+${ units, AlertMgr, SysCall ...) are NOT named: the linker finds them      }
+${ through INTRINSIC.LIB.  Same recipe as LFU-LINK and TWC-LINK.           }
+${==========================================================================}
+F{ilemgr}D{elete}LFT/LFT.OBJ  Y{es}
+        Q{uit}
+${                                                                          }
+L{inker}LFT/MAIN.OBJ
+LFT/GLOBALS.OBJ
+LFT/FNBUS.OBJ
+IOSPASLIB.OBJ
+SYS1LIB.OBJ
+SYS2LIB.OBJ
+{end of the input list - this comment-only line is the blank answer}
+{no listing file - second blank answer}
+LFT/LFT.OBJ
+$ENDEXEC

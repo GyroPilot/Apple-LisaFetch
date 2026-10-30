@@ -1,0 +1,164 @@
+unit LftGlobals;
+
+{ REV A  30-Oct-2026  First build of LisaFetch (tool 419325): fetch a    }
+{                      text file from the web and save it as a Workshop }
+{                      .TEXT file.  Asked for on Facebook by Chris       }
+{                      Rupnik ("transfer source text files onto a Lisa") }
+{                      and Tim said build it.  Skeleton: EFJ-GLOBALS     }
+{                      REV D (the ESPFuji test tool).                    }
+
+{ LFT-GLOBALS.TEXT -- LisaFetch.                                         }
+{ State only.  The network is unit FnBus (LFT-FNBUS, LisaFuji's REV Z    }
+{ unit): an RS-232 FujiNet, a LisaNet, or an ESPFuji ESProFile.          }
+
+INTERFACE
+
+uses (*$U UnitStd.obj *)   UnitStd,
+     (*$U UnitHz.obj *)    UnitHz,
+     (*$U Storage.obj *)   Storage,
+     (*$U QuickDraw.obj *) QuickDraw,
+     (*$U Fontmgr.obj *)   FontMgr,
+     (*$U SysCall.obj *)   SysCall,
+     (*$U wm.events.obj *) Events,
+     (*$U wm.folders.obj *) Folders,
+     (*$U wm.menus.obj *)  Menus,
+     (*$U AlertMgr.obj *)  AlertMgr,
+     (*$U WMLstd.obj *)    WMLstd,
+     (*$U WMlCrs.obj *)    WMLCrs,
+     (*$U FilerComm.obj *) FilerComm;
+
+const
+   lftVersion = 'LisaFetch 0.1';
+
+   winW = 600;                { the status window }
+   winH = 300;
+   maxLines = 18;             { status lines kept and drawn }
+   lineHt   = 16;
+   urlCap   = 250;            { characters of a typed address }
+   nameCap  = 32;             { characters of a typed file name or path }
+   pageSz   = 1024;           { a Workshop text page }
+   lineMax  = 1000;           { a longer line is cut in two }
+   prevMax  = 8;              { lines kept for the preview }
+
+   { what the typed prompt is asking for }
+   askNone  = 0;
+   askUrl   = 1;
+   askName  = 2;
+   askRepl  = 3;              { the file is there: Y replaces it }
+
+   { Menus.  A '-' separator COUNTS as an item position.                 }
+   mFile = 1;                 { "File/Print" }
+      miAsideAll = 1;
+      miAside    = 2;
+      { 3 is a separator }
+      miPutAway  = 4;
+
+   mFetch = 2;                { "Fetch" }
+      miGet   = 1;            { Fetch a Text File .../G }
+      miAgain = 2;            { Fetch Again/R }
+
+   mHelp = 3;                 { "Help" }
+      miHelpUse = 1;          { How to Use/? }
+
+   mVer = 4;                  { "Version" }
+      miAbout = 1;
+
+   lastBarMenu = 4;
+   lastMenu    = 4;
+
+   alertVerNum = 1;
+   alrtAbou   = 11;           { the About box }
+
+   { Heap: only the alert cache lives here.  4,000 integers = 8,000 bytes. }
+   maxHeap = 4000;
+
+type
+   StatStr = string[80];
+   LtName  = string[32];
+   LtByte  = -128..127;
+
+var
+   theEvent  : EventRecord;
+   myWindow  : WindowPtr;
+   toldToDie : boolean;
+   initing   : boolean;
+   myMenus   : array [1..lastMenu] of MenuInfo;
+   allAlerts : TAlertFile;
+   myZone    : array [0..maxHeap] of integer;
+
+   { the status pane: a short list of lines }
+   statLine  : array [1..maxLines] of StatStr;
+   statCnt   : integer;
+   quiet     : boolean;       { TRUE while a page is being built; AddLine }
+                              { then skips the repaint }
+
+   myVol     : E_Name;        { the device this tool lives on, e.g. -#12- }
+   curBaud   : longint;       { the serial speed (FNSPEED.DATA), 9600 or 19200 }
+
+   { the typed prompt on the last status line }
+   asking    : integer;       { askNone .. askRepl }
+   promptOn  : boolean;
+   promptTxt : Str255;        { what has been typed so far }
+   promptLbl : StatStr;       { the label drawn before it }
+
+   curUrl    : Str255;        { the last address (R fetches it again) }
+   curName   : LtName;        { the last file name }
+
+   { the file being written }
+   pgBuf     : array [0..pageSz] of LtByte;   { the Workshop page being filled }
+   pgLen     : integer;
+   lnBuf     : array [0..pageSz] of LtByte;   { the line being collected }
+   lnLen     : integer;
+   wrRef     : integer;       { refnum of the temporary file }
+   wrEc      : integer;       { ecode of the last file call }
+   wrBad     : boolean;       { a write failed }
+   prevCR    : boolean;       { the last byte was a CR (a LF after it is skipped) }
+   gotBytes  : longint;       { bytes received from the network }
+   nLines    : longint;       { lines written }
+   nPages    : integer;       { text pages written (the header page not counted) }
+   nCut      : integer;       { lines longer than lineMax, cut }
+   nOdd      : longint;       { bytes outside 32..126 replaced or dropped }
+   prev      : array [1..prevMax] of StatStr;
+   nPrev     : integer;
+
+procedure HandleFilerOp (var wantsOpen : boolean);
+
+
+IMPLEMENTATION
+
+procedure HandleFilerOp {var wantsOpen : boolean};
+var fx  : FilerExt;
+    err : integer;
+begin
+   wantsOpen := false;
+   GetAddParms(err, theEvent, fx);
+
+   case fx.theFlrOp of
+
+      fcNone :
+         wantsOpen := true;              { the user opened the tool }
+
+      fcResume :
+         TellFiler(err, docClosd, internalError, theEvent.who);
+
+      fcClose, fcSuspend, fcShred :
+         begin
+            myWindow := nil;
+            TellFiler(err, docClosd, allOK, theEvent.who)
+         end;
+
+      fcCopy, fcPut :
+         TellFiler(err, docNotXfered, internalError, theEvent.who);
+
+      fcDfClose :
+         TellFiler(err, dfClosed, allOK, theEvent.who);
+
+      fcTerminate :
+         toldToDie := true;
+
+      otherwise
+
+   end
+end;
+
+end.
