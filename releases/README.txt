@@ -1,3 +1,11 @@
+LisaFetch 0.1, update 1 (3 November 2026, release build REV C)      tool 419325
+Same LisaFetch 0.1 program with these changes, tested on a Lisa 2/10 through an ESProFile running ESPFuji on 3
+November 2026; the floppy LISAFETCH_0_1.dc42 replaces the earlier one of the same name:
+- A failed connection through an ESProFile now shows the ESProFile's own reason ("the drive said: ...")
+  instead of only "status 207".
+
+--------------------------------------------------------------------------------------------------------------
+
 LisaFetch 0.1 (2 November 2026)      tool 419325      Tim O'Connor (bmwcyclist)
 
 Fetches a plain text file from the web and saves it on your Lisa as a Workshop .TEXT file, ready for the

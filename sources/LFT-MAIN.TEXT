@@ -492,6 +492,8 @@ begin
       why := 'the server sent nothing back'
    else if st = 170 then
       why := 'the server was not found (status 170): is the WiFi up?'
+   else if (st = 207) and (fnVia = fnViaMb) and (length(fnMbWhy) > 0) then
+      why := concat('the drive said: ', fnMbWhy)   { 2 Nov: the drive's own reason }
    else if st = 207 then
       why := 'no connection to the server (status 207)'
    else if fnVia = fnViaMb then begin
