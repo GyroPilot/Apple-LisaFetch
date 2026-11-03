@@ -27,10 +27,14 @@ as icons.
 
 ## Status
 
-**0.1 (REV A), 30 October 2026, test build.** Compiled and installed with the Workshop 3.0 in LisaEm; run on the Lisa
-Office System in LisaEm through PCFuji, it fetched a GitHub file and saved it (read back: identical, line for line).
-Its output is byte-identical to the Workshop text that TorZidan's LisaFileSystemTool writes for the same file.
-Not yet run on a real Lisa.
+**0.1, 2 November 2026 (release build REV B).** Tested on a Lisa 2/10 through an ESProFile running ESPFuji 1.1 beta:
+a 42-line exec file from GitHub saved as a Workshop text file, and the "Replace it?" question when fetching to the
+same name again. Also compiled and installed with the Workshop 3.0 in LisaEm; run there through PCFuji, the saved file
+matched GitHub's line for line, and its output is byte-identical to the Workshop text that TorZidan's
+LisaFileSystemTool writes for the same file.
+
+New since the 30 October test build: the ESPFuji mailbox is looked for as "ESPFuji Mailbox" first, then MAILBOX.DATA;
+the release floppy's tool name no longer has trailing spaces.
 
 ## Building
 

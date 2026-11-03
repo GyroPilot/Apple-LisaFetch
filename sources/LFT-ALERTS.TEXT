@@ -35,7 +35,7 @@ Put your documents away one at a time, or press the on-off button to
 save them all.
 
 11 note alert
-LisaFetch 0.1   (30 October 2026)^L^L
+LisaFetch 0.1   (1 November 2026)^L^L
 Fetches a text file from the web and saves it as a Workshop .TEXT file
 beside the tool (or at a path you type), for the Editor and the Pascal
 compiler.  Through an ESPFuji ESProFile, an RS-232 FujiNet or a LisaNet.^L^L
